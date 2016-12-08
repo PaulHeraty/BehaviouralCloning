@@ -37,8 +37,17 @@ from keras.models import model_from_json
 # Define our variables here
 ################################################################
 fine_tune_mode = True
+size_image = True
+use_shuffle = True
 
+use_dropout = True
+dropout_factor = 0.4
+w_reg=0.00
+batch_norm = False
+norm_inputs = True
+max_pool = False
 if fine_tune_mode:
+    #learning_rate = 0.000001  
     learning_rate = 0.000001  
     use_3cams = False
     use_flip = False
@@ -47,14 +56,15 @@ else:
     use_3cams = False
     use_flip = True
 
-image_sizeX = 160
-image_sizeY = 80
+image_sizeX = 320
+image_sizeY = 160
+if size_image:
+    image_sizeX = 160
+    image_sizeY = 80
 num_channels = 3 
 n_classes = 1 # This is a regression, not a classification
 nb_epoch = 5
 batch_size = 100
-dropout_factor = 0.4
-w_reg=0.00
 
 input_shape1 = (image_sizeY, image_sizeX, num_channels)
 num_filters1 = 24
@@ -80,14 +90,44 @@ hidden_layers2 = 50
 # Define any functions that we need
 ################################################################
 
-# Read in the image, re-size and flip in necessary
+# Read in the image, flip in necessary
 def process_image(filename, flip=0):
+    #print("Reading image file {}".format(filename))
     image = cv2.imread(filename)
-    image = cv2.resize(image, (image_sizeX, image_sizeY))
+    if size_image:
+        image = cv2.resize(image, (image_sizeX, image_sizeY))
+    #print("Image read...")
     if flip == 1:
         image = cv2.flip(image, 1)
-    final_image = image[np.newaxis, ...]
+        #print("Image flipped...")
+    # Normalization now done in graph
+    #normalized_image = normalize_image(image)
+    normalized_image = image
+    #print("Addding axis..")
+    final_image = normalized_image[np.newaxis, ...]
+    #print("Returning image...")
     return final_image
+
+# Routine to plot a graph showing angle distributions
+def plot_dist(X):
+    y_train_list = sorted([x[1] for x in X])
+    y_train_list = [float(i) for i in y_train_list]
+    fit = stats.norm.pdf(y_train_list, np.mean(y_train_list), np.std(y_train_list))    
+    pl.plot(y_train_list,fit,'-o')
+    pl.hist(y_train_list,normed=True)
+    pl.show()
+
+# Plot the steering angles over time
+def plot_steering(X, X_smooth):
+    y = [x[1] for x in X]
+    y_smooth = [x[1] for x in X_smooth]
+    x = [i for i in range(len(X))]
+    plt.plot(x, y, label='orig')
+    plt.plot(x, y_smooth, label='smooth')
+    plt.xlabel('Frame Number')
+    plt.ylabel('Steering Angle')
+    plt.legend(loc='upper right')
+    plt.show()
 
 # Calculate the correct number of samples per epoch based on batch size
 def calc_samples_per_epoch(array_size, batch_size):
@@ -106,24 +146,31 @@ def calc_samples_per_epoch(array_size, batch_size):
 
 def get_next_image_angle_pair(image_list):
     index = 0
+    #print("Len : {}".format(len(image_list)))
     while 1:
         final_images = np.ndarray(shape=(batch_size, image_sizeY, image_sizeX, num_channels), dtype=float)
         final_angles = np.ndarray(shape=(batch_size), dtype=float)
         for i in range(batch_size):
             if index >= len(image_list):
                 index = 0
-                # Shuffle X_train after every epoch
-                shuffle(image_list)
+                if use_shuffle:
+                    shuffle(image_list)
             filename = image_list[index][0]
+            #print("Grabbing image {}".format(filename))
             angle = image_list[index][1]
+            #print("  Angle {}".format(angle))
             flip = image_list[index][2]
+            #print("  Flip {}".format(flip))
             final_image = process_image(filename, flip)
+            #print("Processed image {}".format(filename))
             final_angle = np.ndarray(shape=(1), dtype=float)
             final_angle[0] = angle
             final_images[i] = final_image
             final_angles[i] = angle
             index += 1
+        #print("Returning next batch")
         yield ({'batchnormalization_input_1' : final_images}, {'output' : final_angles})
+        #yield ({'convolution2d_input_1' : final_images}, {'output' : final_angles})
 
 ###############################################
 ############### START #########################
@@ -136,6 +183,7 @@ with open('driving_log.csv', 'r') as f:
     reader = csv.reader(f)
     driving_log_list = list(reader)
 num_frames = len(driving_log_list)
+#num_frames=500
 print("Found {} frames of input data.".format(num_frames))
 
 # Process this list so that we end up with training images and labels
@@ -143,6 +191,7 @@ if use_3cams:
     X_train = [("", 0.0, 0) for x in range(num_frames*3)]
     print(len(X_train))
     for i in range(num_frames):
+        #print(i)
         X_train[i*3] = (driving_log_list[i][0].lstrip(),         # center image
                   float(driving_log_list[i][3]),  # center angle 
                   0)                              # dont flip
@@ -178,7 +227,8 @@ print("After list pre-processing, now have {} frames".format(num_frames))
 
 # Split some of the training data into a validation dataset.
 # First lets shuffle the dataset, as we added lots of non-zero elements to the end
-shuffle(X_train)
+if use_shuffle:
+    shuffle(X_train)
 num_train_elements = int((num_frames/4.)*3.)
 num_valid_elements = int(((num_frames/4.)*1.) / 2.)
 X_valid = X_train[num_train_elements:num_train_elements + num_valid_elements]
@@ -187,6 +237,9 @@ X_train = X_train[:num_train_elements]
 print("X_train has {} elements.".format(len(X_train)))
 print("X_valid has {} elements.".format(len(X_valid)))
 print("X_test has {} elements.".format(len(X_test)))
+
+# Lets look at the distribution of items
+#plot_dist(X_train)
 
 ################################################################
 # Load the existing model  & weights if we are fine tuning
@@ -210,9 +263,11 @@ else:
     print("**********************************")
     model = Sequential()
     # CNN Layer 1
-    model.add(Lambda(lambda x: x/128. -1.,
+    if norm_inputs:
+        model.add(Lambda(lambda x: x/128. -1.,
                         input_shape=input_shape1,
                         output_shape=input_shape1))
+        #model.add(BatchNormalization(input_shape=input_shape1, axis=1))
     model.add(Convolution2D(nb_filter=num_filters1, 
                         nb_row=filter_size1, 
                         nb_col=filter_size1,
@@ -220,6 +275,10 @@ else:
                         border_mode='valid',
                         input_shape=input_shape1, 
                         W_regularizer=l2(w_reg)))
+    if max_pool:
+        model.add(MaxPooling2D(pool_size=pool_size))
+    if batch_norm:
+        model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # CNN Layer 2
     model.add(Convolution2D(nb_filter=num_filters2, 
@@ -228,7 +287,12 @@ else:
                         subsample=stride2,
                         border_mode='valid', 
                         W_regularizer=l2(w_reg)))
-    model.add(Dropout(dropout_factor))
+    if max_pool:
+        model.add(MaxPooling2D(pool_size=pool_size))
+    if use_dropout:
+        model.add(Dropout(dropout_factor))
+    if batch_norm:
+        model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # CNN Layer 3
     model.add(Convolution2D(nb_filter=num_filters3, 
@@ -237,7 +301,12 @@ else:
                         subsample=stride3,
                         border_mode='valid', 
                         W_regularizer=l2(w_reg)))
-    model.add(Dropout(dropout_factor))
+    if max_pool:
+        model.add(MaxPooling2D(pool_size=pool_size))
+    if use_dropout:
+        model.add(Dropout(dropout_factor))
+    if batch_norm:
+        model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # CNN Layer 4
     model.add(Convolution2D(nb_filter=num_filters4,
@@ -246,7 +315,12 @@ else:
                         subsample=stride4,
                         border_mode='valid', 
                         W_regularizer=l2(w_reg)))
-    model.add(Dropout(dropout_factor))
+    if max_pool:
+        model.add(MaxPooling2D(pool_size=pool_size))
+    if use_dropout:
+        model.add(Dropout(dropout_factor))
+    if batch_norm:
+        model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # CNN Layer 5
     model.add(Convolution2D(nb_filter=num_filters5,
@@ -255,12 +329,21 @@ else:
                         subsample=stride5,
                         border_mode='valid', 
                         W_regularizer=l2(w_reg)))
-    model.add(Dropout(dropout_factor))
+    if max_pool:
+        model.add(MaxPooling2D(pool_size=pool_size))
+    if use_dropout:
+        model.add(Dropout(dropout_factor))
+    if batch_norm:
+        model.add(BatchNormalization(axis=1))
     model.add(Activation('relu'))
     # Flatten
     model.add(Flatten())
     # FCNN Layer 1
-    model.add(Dense(hidden_layers1, input_shape=(2496,), name="hidden1", W_regularizer=l2(w_reg)))
+    #model.add(Dense(hidden_layers1, input_shape=(7200,), name="hidden1", W_regularizer=l2(w_reg)))
+    if size_image:
+        model.add(Dense(hidden_layers1, input_shape=(2496,), name="hidden1", W_regularizer=l2(w_reg)))
+    else:
+        model.add(Dense(hidden_layers1, input_shape=(27456,), name="hidden1", W_regularizer=l2(w_reg)))
     model.add(Activation('relu'))
     # FCNN Layer 2
     model.add(Dense(hidden_layers2, name="hidden2", W_regularizer=l2(w_reg)))
@@ -308,6 +391,7 @@ print("Test score {}".format(score))
 ################################################################
 model_json = model.to_json()
 with open("./model.json", "w") as json_file:
+    #json_file.write(model_json)
     json.dump(model_json, json_file)
 model.save_weights("./model.h5")
 print("Saved model to disk")
